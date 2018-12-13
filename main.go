@@ -8,19 +8,21 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/gorilla/websocket"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
 	"google.golang.org/api/analytics/v3"
+
+	s "strings"
 )
 
 const (
-	gaCreds string = "./config.json"
+	acceptedBrowsers string = "^Chrome|Edge|Firefox|Internet Explorer|Opera|Safari$"
+	gaCreds          string = "./config.json"
 )
 
 func auth() *http.Client {
-	creds := getAnalyticsCredsFromJSON(gaCreds)
+	creds := getCreds(gaCreds)
 
 	conf := &jwt.Config{
 		Email:        creds.ClientEmail,
@@ -39,9 +41,13 @@ type analyticsCred struct {
 	PrivateKeyID string `json:"private_key_id"`
 }
 
-type usersByBrowserVerion = map[string]map[string]int
+type browserSessions = map[string]int
 
-func getAnalyticsCredsFromJSON(file string) analyticsCred {
+type analyticsData = [][]string
+
+type responseData = map[string]map[string]int
+
+func getCreds(file string) analyticsCred {
 	byteValue, _ := ioutil.ReadFile(file)
 
 	var res analyticsCred
@@ -51,70 +57,108 @@ func getAnalyticsCredsFromJSON(file string) analyticsCred {
 	return res
 }
 
-func getReport() [][]string {
-	startDate := "2016-10-12"
-	endDate := "2018-10-12"
+func getReport(startDate string, endDate string) analyticsData {
 	dimensions := "ga:browser,ga:browserVersion"
 	sortBy := "ga:sessions"
 	viewID := "ga:62539387"
 	metrics := "ga:sessions"
 
-	analyticsService, err := analytics.New(auth())
+	analytics, _ := analytics.New(auth())
 
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	data, err := analyticsService.Data.Ga.Get(viewID, startDate, endDate, metrics).Dimensions(dimensions).Sort(sortBy).Do()
-
-	if err != nil {
-		fmt.Println(err)
-	}
+	data, _ := analytics.Data.Ga.Get(viewID, startDate, endDate, metrics).Dimensions(dimensions).Sort(sortBy).Do()
 
 	return data.Rows
 }
 
-func formatReportData(data [][]string) usersByBrowserVerion {
-	result := make(usersByBrowserVerion)
+func compare(h browserSessions, r browserSessions) browserSessions {
+	result := make(browserSessions)
 
-	for _, browser := range data {
-		_, exists := result[browser[0]]
-
-		if exists {
-			r, _ := regexp.Compile("^([^.]+)")
-
-			majorRelease := r.FindString(browser[1])
-
-			sessions, err := strconv.Atoi(browser[2])
-
-			if err != nil {
-				fmt.Println(err)
-			}
-
-			result[browser[0]][majorRelease] = result[browser[0]][majorRelease] + sessions
-		} else {
-			versions := make(map[string]int)
-
-			result[browser[0]] = versions
-		}
+	for k := range r {
+		result[k] = r[k] - h[k]
 	}
 
 	return result
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+func format(data analyticsData) browserSessions {
+	result := make(browserSessions)
+
+	for _, bv := range data {
+		r, _ := regexp.Compile("^([^.]+)")
+
+		major := r.FindString(bv[1])
+
+		sessions, _ := strconv.Atoi(bv[2])
+
+		bv := s.Join([]string{bv[0], major}, "_")
+
+		result[bv] = result[bv] + sessions
+	}
+
+	return result
+}
+
+func clean(data analyticsData) analyticsData {
+	filtered := make(analyticsData, 0)
+	browsers, _ := regexp.Compile(acceptedBrowsers)
+
+	for _, value := range data {
+		if browsers.MatchString(value[0]) {
+			filtered = append(filtered, value)
+		}
+	}
+
+	return filtered
+}
+
+func getJSON(data browserSessions) responseData {
+	result := make(responseData, 0)
+
+	for k, v := range data {
+		bv := s.Split(k, "_")
+
+		_, exists := result[bv[0]]
+
+		if !exists {
+			result[bv[0]] = make(map[string]int)
+		}
+
+		result[bv[0]][bv[1]] = v
+	}
+
+	return result
 }
 
 func main() {
-	result, _ := json.Marshal(formatReportData(getReport()))
+	historical := clean(getReport("2014-10-12", "2018-10-12"))
+	recent := getJSON(format(clean(getReport("2017-10-12", "2018-10-12"))))
+
+	fHistorical := format(historical)
+	fRecent := format(recent)
+
+	compared := compare(fHistorical, fRecent)
+
+	response := getJSON(format(clean(getReport("2017-10-12", "2018-10-12"))))
+
+	result, err := json.Marshal(response)
+
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	})
+
+	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
 		w.Write(result)
 	})
 
-	http.ListenAndServe(":5060", nil)
+	const port = "5060"
+
+	fmt.Printf("Listening on port: %s", port)
+
+	http.ListenAndServe(":"+port, nil)
 }
