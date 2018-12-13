@@ -1,0 +1,9 @@
+package: .
+import:
+- package: golang.org/x/oauth2
+  subpackages:
+  - google
+  - jwt
+- package: google.golang.org/api
+  subpackages:
+  - analytics/v3
